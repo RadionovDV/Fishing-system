@@ -23,7 +23,6 @@ local Signal = require(ReplicatedStorage.Utils.Signal)
 local TableUtils = require(ReplicatedStorage.Utils.TableUtils)
 local FishingDescription = require(script.Parent.FishingDescription)
 local FishingConfig = require(script.Parent.FishingConfig)
-local TensionHandler = require(script.TensionHandler)
 local PowerHandler = require(script.PowerHandler)
 local BiteIndicator = require(script.BiteIndicator)
 
@@ -54,7 +53,7 @@ export type ClassType = typeof(setmetatable({} :: {
 	fishWeight: number,
 	castTime: number,
 	biteIndicator: BiteIndicator.ClassType,
-	tensionHandler: TensionHandler.ClassType,
+	tensionHandler: TensClassType,
 	screenGui: ScreenGui,
 	connections: { [string]: Signal.SignalConnection },
 }, FishingSystem))
