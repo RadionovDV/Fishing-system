@@ -59,6 +59,252 @@ export type ClassType = typeof(setmetatable({} :: {
 	connections: { [string]: Signal.SignalConnection },
 }, FishingSystem))
 
+type TensionBar = Frame & {
+	CatchZone: Frame,
+	FishIcon: ImageLabel,
+	ProgressLabel: TextLabel,
+}
+
+local tensionBarTemplate = ReplicatedStorage.FishingManager.UI.Objects.TensionBar :: TensionBar
+
+local TensionHandler = {}
+TensionHandler.__index = TensionHandler
+
+type FinishedFunc = (boolean) -> ()
+
+export type TensClassType = typeof(setmetatable({} :: {
+	fishType: string,
+	startTime: number,
+	prevStep: number,
+	preventLose: boolean,
+	progress: number,
+	progressSpeed: number,
+
+	catchPosition: number,
+	catchRising: boolean,
+	catchZoneSpeed: number,
+	catchZoneSize: number,
+
+	fishPosition: number,
+	fishRising: boolean,
+	fishDestination: number,
+	fishMoveTime: number,
+
+	tensionBarUI: TensionBar,
+	catchZoneUI: Frame,
+	fishIconUI: ImageLabel,
+	progressLabelUI: TextLabel,
+
+	finishedFunc: FinishedFunc,
+	connection: RBXScriptConnection
+}, TensionHandler))
+
+local START_FISH_POSITION = 50
+local PLACEHOLDER_FISH_DESTINATION = 80
+local PLACEHOLDER_FISH_MOVE_TIME = 5
+
+-- Here we create TensionHandler, which implements the fishing mini-game
+function TensionHandler.new(fishType: string, fishWeight: number, rodType: string, finishedFunc: FinishedFunc): TensClassType
+	local tensionBar = tensionBarTemplate:Clone()
+	local catchZone = tensionBar.CatchZone
+	local fishIcon = tensionBar.FishIcon
+	local progressLabel = tensionBar.ProgressLabel
+
+	local minWeight = FishingDescription.fishTypes[fishType].weightMin
+	local maxWeight = FishingDescription.fishTypes[fishType].weightMax
+	local decelerationPercent = (fishWeight - minWeight) * 100 / maxWeight
+
+	local baseSpeed = FishingDescription.fishTypes[fishType].fishingSpeedProgress
+	local progressSpeed = baseSpeed * (decelerationPercent / 100)
+
+	local self = {
+		-- Base
+		fishType = fishType,
+		startTime = os.clock(),
+		prevStep = os.clock(),
+		preventLose = true,
+		progress = 0,
+		progressSpeed = progressSpeed,
+
+		-- Catch Zone
+		catchPosition = START_FISH_POSITION,
+		catchRising = false,
+		catchZoneSpeed = FishingDescription.rodTypes[rodType].catchZoneSpeed,
+		catchZoneSize = FishingDescription.fishTypes[fishType].catchZone,
+
+		-- Fish Behavior
+		fishPosition = START_FISH_POSITION,
+		fishRising = true,
+		fishDestination = PLACEHOLDER_FISH_DESTINATION,
+		fishMoveTime = PLACEHOLDER_FISH_MOVE_TIME,
+
+		--UI
+		tensionBarUI = tensionBar,
+		catchZoneUI = catchZone,
+		fishIconUI = fishIcon,
+		progressLabelUI = progressLabel,
+
+		finishedFunc = finishedFunc,
+	}
+	setmetatable(self, TensionHandler)
+
+	catchZone.Size = UDim2.fromScale(1, self.catchZoneSize)	
+
+	self:_updateFishBehavior(self.fishPosition)
+	self.connection = RunService.Heartbeat:Connect(function()
+		self:_update()
+	end)
+
+	task.delay(FishingConfig.PENDING_BEFORE_TENSION, function() self.preventLose = false end)
+
+	return self
+end
+
+-- When the player presses or releases the action button, it switches the catch rising direction up or down
+function TensionHandler.switchCatchZone(self: TensClassType, rising: boolean)
+	self.catchRising = rising
+end
+
+-- In this method we calculate the green zone position and fish icon position 
+-- when the fish icon stays inside the green zone, we increase the percent 
+-- otherwise the percent decreases 
+function TensionHandler._update(self: TensClassType)
+	local step = os.clock()
+	self.catchPosition = self:_getCatchPosiiton(step)
+	self.fishPosition = self:_getFishPosiiton(step)
+	self.progress = self:_getProgress(step)
+
+	self:_updateUI()
+	self.prevStep = step
+
+	if self.progress >= 100 then
+		self:_clear()
+		self.finishedFunc(true)
+	end
+
+	if self.progress <= 0 and not self.preventLose then
+		self:_clear()
+		self.finishedFunc(false)
+	end
+end
+
+-- Here we calculate when the fish icon changes movement direction and speed
+function TensionHandler._updateFishBehavior(self: TensClassType, fishPosition: number)
+	local behavior =  FishingDescription.fishTypes[self.fishType].behavior
+
+	-- calculate jerk probability
+	local isJerk = math.random() * 100 <= behavior.jerkProbability and true or false
+	if isJerk then
+		self.fishMoveTime = behavior.jerkTime
+	else
+		self.fishMoveTime = behavior.maxMoveTime - math.random() * (behavior.maxMoveTime - behavior.minMoveTime)
+	end
+
+	-- calculate move distance
+	local isRaiseDirection = math.random() >= 0.5 and true or false
+	local moveDistance = behavior.maxMoveDistance - math.random() * (behavior.maxMoveDistance - behavior.minMoveDistance)
+
+	if isJerk then
+		moveDistance = moveDistance * behavior.jerkDistanceMult
+	end
+
+	local nextDestination: number
+	if isRaiseDirection then
+		nextDestination = fishPosition - moveDistance
+		if nextDestination < 0 and fishPosition <= 50 then
+			isRaiseDirection = false
+		end
+	end
+	if not isRaiseDirection then
+		nextDestination = fishPosition + moveDistance
+	end
+
+	self.fishRising = isRaiseDirection
+	self.fishDestination = math.clamp(nextDestination, 0, 100)
+end
+
+-- calculation of the green zone
+function TensionHandler._getCatchPosiiton(self: TensClassType, step: number): number
+	local catchStep = (step - self.prevStep) * 100 / self.catchZoneSpeed
+
+	local catchPercent = self.catchPosition
+	if self.catchRising then
+		catchPercent -= catchStep
+	else
+		catchPercent += catchStep
+	end	
+	return math.clamp(catchPercent, 0, 100)
+end
+
+-- calculate fish icon position
+function TensionHandler._getFishPosiiton(self: TensClassType, step: number): number
+	local fishStep = (step - self.prevStep) * 100 / self.fishMoveTime
+	local fishPosition = self.fishPosition
+
+	if self.fishRising then
+		fishPosition -= fishStep
+		if fishPosition <= self.fishDestination then
+			self:_updateFishBehavior(fishPosition)
+		end
+	else
+		fishPosition += fishStep
+		if fishPosition >= self.fishDestination then
+			self:_updateFishBehavior(fishPosition)
+		end
+	end
+
+	return math.clamp(fishPosition, 0, 100)
+end
+
+-- calculate progress percent
+function TensionHandler._getProgress(self: TensClassType, step: number): number
+	local progressStep = (step - self.prevStep) * 100 / self.progressSpeed
+
+	--75 (100% - catchSize(25)) Portion of the bar where the catch zone can move
+	local availableBarPercent = 100 - self.catchZoneSize * 100 -- Could be moved to self
+
+	-- from 0 to 75 (currentPercent / 100 * 75) catch position scaled to the available movement range
+	local catchPositionInAvailableRange = self.catchPosition / 100 * availableBarPercent 
+
+	-- 12.5 (catchSize(25) / 2) Offset required to center the catch zone (half of its size)
+	local catchZoneHalfOffsetPercent = self.catchZoneSize * 100 / 2 -- Could be moved to self
+
+	-- from 12.5 to 87.5 Final calculated position of the catch zone on the bar
+	local finalCatchPosition = catchZoneHalfOffsetPercent + catchPositionInAvailableRange
+
+	local catchMinBorder = finalCatchPosition - catchZoneHalfOffsetPercent
+	local catchMaxBorder = finalCatchPosition + catchZoneHalfOffsetPercent
+	local fishPosition = self.fishPosition
+	--local fishPosition = 90
+	local progress = self.progress
+
+	if fishPosition >= catchMinBorder and fishPosition <= catchMaxBorder then
+		progress += progressStep
+	else
+		progress -= progressStep
+	end
+
+	return math.clamp(progress, 0, 100)
+end
+
+-- here we update the screen GUI for the player, we just change parameters of the fish icon and green zone
+function TensionHandler._updateUI(self: TensClassType)
+	local catchZonePosition = (1 - self.catchZoneSize) * (self.catchPosition / 100) + self.catchZoneSize
+
+	self.catchZoneUI.Position = UDim2.fromScale(0, catchZonePosition)
+
+	local fishIconPosition = self.fishPosition / 100
+	self.fishIconUI.Position = UDim2.fromScale(0.5, fishIconPosition)
+
+	local progress = math.floor(self.progress)
+	self.progressLabelUI.Text = `{progress} %`
+end
+
+function TensionHandler._clear(self: TensClassType)
+	self.connection:Disconnect()
+	self.tensionBarUI:Destroy()
+end
+
 -- We create this singleton class once when the player joins the game
 function FishingSystem.new(): ClassType
 	local self = {
