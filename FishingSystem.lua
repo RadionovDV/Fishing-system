@@ -2,13 +2,49 @@
 --[[
 	this code was completely written without AI
 	you can see the whole process of writing by this link in Google Drive
-	
 	https://drive.google.com/file/d/1M6eq35zA7BQfFiciGyUdV-vB70OnbGwK/view?usp=sharing
 ]]
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
+-- I use signal events instead of BindableEvents. It's a widely used pattern in Roblox resources
+local Signal = require(ReplicatedStorage.Utils.Signal)
+-- There just use widely used functions related to table operations
+local TableUtils = require(ReplicatedStorage.Utils.TableUtils)
+-- there is basic information about the fish and their behavior
+local FishingDescription = require(script.Parent.FishingDescription)
+-- there is located constants and state names
+local FishingConfig = require(script.Parent.FishingConfig)
+-- Early TensionHandler was in seperate file, but about of 200 lines rule I had to move it to this file
+local TensionHandler = require(script.TensionHandler)
+-- This module implements throwing fishing rod logic and displays it on ScreenGui
+local PowerHandler = require(script.PowerHandler)
+-- This module shows bite label when fish bites
+local BiteIndicator = require(script.BiteIndicator)
+
+-- there are GUI elements that show pregress of fishing for palyer using his screenGui
+local fishingGuiTemplate = ReplicatedStorage.FishingManager.UI.Objects.FishingGui :: ScreenGui
+local rewardFrameTemplate = ReplicatedStorage.FishingManager.UI.Objects.RewardFrame :: RewardFrame
+local messageLabelTemplate = ReplicatedStorage.FishingManager.UI.Objects.MessageLabel :: TextLabel
+local tensionBarTemplate = ReplicatedStorage.FishingManager.UI.Objects.TensionBar :: TensionBar
+
+local player = Players.LocalPlayer :: Player
+local playerGui = player.PlayerGui 
+
+-- There I just save words that I will use for LabelText
+local TEXT_REWARD_TEXT = "You caught a"
+local TEXT_RARITY_TEXT = "Rarity:"
+local TEXT_WEIGHT_TEXT = "Weight:"
+local TEXT_FISH_BROKE = "The fish broke"
+local TEXT_FISH_MISSED = "The fish was missed"
+
+-- these numbers point on initial state of tension handler elements
+local START_FISH_POSITION = 50
+local PLACEHOLDER_FISH_DESTINATION = 80
+local PLACEHOLDER_FISH_MOVE_TIME = 5
+
+-- Everywhere I used types so my code was more clearable and I was spend less time on debug
 type RewardFrame = Frame & {
 	AcceptButton: TextButton,
 	RewardText: TextLabel,
@@ -19,59 +55,18 @@ type RewardFrame = Frame & {
 	}
 }
 
-local Signal = require(ReplicatedStorage.Utils.Signal)
-local TableUtils = require(ReplicatedStorage.Utils.TableUtils)
-local FishingDescription = require(script.Parent.FishingDescription)
-local FishingConfig = require(script.Parent.FishingConfig)
-local PowerHandler = require(script.PowerHandler)
-local BiteIndicator = require(script.BiteIndicator)
-
-local fishingGuiTemplate = ReplicatedStorage.FishingManager.UI.Objects.FishingGui :: ScreenGui
-local rewardFrameTemplate = ReplicatedStorage.FishingManager.UI.Objects.RewardFrame :: RewardFrame
-local messageLabelTemplate = ReplicatedStorage.FishingManager.UI.Objects.MessageLabel :: TextLabel
-
-local player = Players.LocalPlayer :: Player
-local playerGui = player.PlayerGui 
-
-local TEXT_REWARD_TEXT = "You caught a"
-local TEXT_RARITY_TEXT = "Rarity:"
-local TEXT_WEIGHT_TEXT = "Weight:"
-local TEXT_FISH_BROKE = "The fish broke"
-local TEXT_FISH_MISSED = "The fish was missed"
-
-local FishingSystem = {}
-FishingSystem.__index = FishingSystem
-
-FishingSystem.actionSignal = Signal.new()
-FishingSystem.releaseSignal = Signal.new()
-FishingSystem.cancelSignal = Signal.new()
-
-export type ClassType = typeof(setmetatable({} :: {
-	activeRod: string,
-	fishingState: number,
-	fishType: string,
-	fishWeight: number,
-	castTime: number,
-	biteIndicator: BiteIndicator.ClassType,
-	tensionHandler: TensClassType,
-	screenGui: ScreenGui,
-	connections: { [string]: Signal.SignalConnection },
-}, FishingSystem))
-
 type TensionBar = Frame & {
 	CatchZone: Frame,
 	FishIcon: ImageLabel,
 	ProgressLabel: TextLabel,
 }
 
-local tensionBarTemplate = ReplicatedStorage.FishingManager.UI.Objects.TensionBar :: TensionBar
-
 local TensionHandler = {}
 TensionHandler.__index = TensionHandler
 
 type FinishedFunc = (boolean) -> ()
 
-export type TensClassType = typeof(setmetatable({} :: {
+export type ClassTypeTension = typeof(setmetatable({} :: {
 	fishType: string,
 	startTime: number,
 	prevStep: number,
@@ -98,12 +93,27 @@ export type TensClassType = typeof(setmetatable({} :: {
 	connection: RBXScriptConnection
 }, TensionHandler))
 
-local START_FISH_POSITION = 50
-local PLACEHOLDER_FISH_DESTINATION = 80
-local PLACEHOLDER_FISH_MOVE_TIME = 5
 
--- Here we create TensionHandler, which implements the fishing mini-game
-function TensionHandler.new(fishType: string, fishWeight: number, rodType: string, finishedFunc: FinishedFunc): TensClassType
+--[[
+	- purpose of module - this module implement tension Handler when player try to catch fish
+	- public methods
+		switchCatchZone - switch catching zone when player press or release button
+	- Module use external files FishingSystem and FishingDescription, 
+		TensionBar for screenGui updating
+	- After completed TensionHandler returns (sucess, result) responce
+	
+	- User flow 
+		-> external action (biting fish and user actions)
+			-> _getCatchPosiiton (updating catch zone position)
+				-> _getFishPosiiton (updating fish position)
+					-> _getProgress (calculate progress)
+						-> _updateUI (show progress on ScreenGui)
+							-> callback (return result of fishing)
+]]
+
+-- inside this method we initialize TensionHandler instance which store necessary information of fish and fishing rod 
+-- for simulate fish behavior
+function TensionHandler.new(fishType: string, fishWeight: number, rodType: string, finishedFunc: FinishedFunc): ClassTypeTension
 	local tensionBar = tensionBarTemplate:Clone()
 	local catchZone = tensionBar.CatchZone
 	local fishIcon = tensionBar.FishIcon
@@ -159,15 +169,14 @@ function TensionHandler.new(fishType: string, fishWeight: number, rodType: strin
 	return self
 end
 
--- When the player presses or releases the action button, it switches the catch rising direction up or down
-function TensionHandler.switchCatchZone(self: TensClassType, rising: boolean)
+-- when player press or release mouse button, this aciton changes catch zone direction
+function TensionHandler.switchCatchZone(self: ClassTypeTension, rising: boolean)
 	self.catchRising = rising
 end
 
--- In this method we calculate the green zone position and fish icon position 
--- when the fish icon stays inside the green zone, we increase the percent 
--- otherwise the percent decreases 
-function TensionHandler._update(self: TensClassType)
+-- each frame we update fishing state and update UI for player
+-- when progress will more than 100% or less 0%, then we return fishing process responce
+function TensionHandler._update(self: ClassTypeTension)
 	local step = os.clock()
 	self.catchPosition = self:_getCatchPosiiton(step)
 	self.fishPosition = self:_getFishPosiiton(step)
@@ -187,11 +196,12 @@ function TensionHandler._update(self: TensClassType)
 	end
 end
 
--- Here we calculate when the fish icon changes movement direction and speed
-function TensionHandler._updateFishBehavior(self: TensClassType, fishPosition: number)
+-- there is fish logic, it move related from its FishingDescription.
+-- randomly fish can make jerk and swith direction with more speed
+function TensionHandler._updateFishBehavior(self: ClassTypeTension, fishPosition: number)
 	local behavior =  FishingDescription.fishTypes[self.fishType].behavior
 
-	-- calculate jerk probability
+	-- calculate jurk probability
 	local isJerk = math.random() * 100 <= behavior.jerkProbability and true or false
 	if isJerk then
 		self.fishMoveTime = behavior.jerkTime
@@ -222,8 +232,8 @@ function TensionHandler._updateFishBehavior(self: TensClassType, fishPosition: n
 	self.fishDestination = math.clamp(nextDestination, 0, 100)
 end
 
--- calculation of the green zone
-function TensionHandler._getCatchPosiiton(self: TensClassType, step: number): number
+-- There we just calculate percent related of time
+function TensionHandler._getCatchPosiiton(self: ClassTypeTension, step: number): number
 	local catchStep = (step - self.prevStep) * 100 / self.catchZoneSpeed
 
 	local catchPercent = self.catchPosition
@@ -235,8 +245,8 @@ function TensionHandler._getCatchPosiiton(self: TensClassType, step: number): nu
 	return math.clamp(catchPercent, 0, 100)
 end
 
--- calculate fish icon position
-function TensionHandler._getFishPosiiton(self: TensClassType, step: number): number
+-- there we check if fish icon rising and in that direction is not space it change direciton 
+function TensionHandler._getFishPosiiton(self: ClassTypeTension, step: number): number
 	local fishStep = (step - self.prevStep) * 100 / self.fishMoveTime
 	local fishPosition = self.fishPosition
 
@@ -255,8 +265,9 @@ function TensionHandler._getFishPosiiton(self: TensClassType, step: number): num
 	return math.clamp(fishPosition, 0, 100)
 end
 
--- calculate progress percent
-function TensionHandler._getProgress(self: TensClassType, step: number): number
+-- There we calculate pregress and defining if fish icon located inside catch zone
+-- There is many difficult math calculations, so that I specify comments durring development yet)
+function TensionHandler._getProgress(self: ClassTypeTension, step: number): number
 	local progressStep = (step - self.prevStep) * 100 / self.progressSpeed
 
 	--75 (100% - catchSize(25)) Portion of the bar where the catch zone can move
@@ -286,8 +297,8 @@ function TensionHandler._getProgress(self: TensClassType, step: number): number
 	return math.clamp(progress, 0, 100)
 end
 
--- here we update the screen GUI for the player, we just change parameters of the fish icon and green zone
-function TensionHandler._updateUI(self: TensClassType)
+-- there we just update catch zone, fish icon and pregress label on Player ScreenGui
+function TensionHandler._updateUI(self: ClassTypeTension)
 	local catchZonePosition = (1 - self.catchZoneSize) * (self.catchPosition / 100) + self.catchZoneSize
 
 	self.catchZoneUI.Position = UDim2.fromScale(0, catchZonePosition)
@@ -299,10 +310,55 @@ function TensionHandler._updateUI(self: TensClassType)
 	self.progressLabelUI.Text = `{progress} %`
 end
 
-function TensionHandler._clear(self: TensClassType)
+-- there we clear connections and UI elements when fishing is done
+function TensionHandler._clear(self: ClassTypeTension)
 	self.connection:Disconnect()
 	self.tensionBarUI:Destroy()
 end
+
+--[[
+	- purpose of module - this module implement fishing proccess from throwing fish to catching fish (or missing fish)
+	- public methods
+		powerHandleAsync - throwing fishing rod implementation
+		waitForFishAsync - bite logic
+		catchingFishAsync - fishing mini-game implementation
+	- Module use external files FishingSystem and FishingDescription, 
+		More deep implementation public method logic for each action PowerHandler, BiteIndicator, TensionHandler
+		Signals for Audio plaing
+		UI elements for screenGui updating
+	- After completed each public modul they return (sucess, result) responce and wait for second stage call
+	
+	- User flow 
+		-> action InputService (user throwing rod)
+			-> call PowerHandler 
+				-> action callback (user fixing power)
+					-> remote Server Validation (server logic)
+						-> call waitForFishAsync
+							-> action callback (user react on bite)
+								-> call catchingFishAsync (without server validation)
+									-> call _showReward
+										-> action callback (user get fish)
+]]
+
+local FishingSystem = {}
+FishingSystem.__index = FishingSystem
+
+-- We use signals for audio effects
+FishingSystem.actionSignal = Signal.new()
+FishingSystem.releaseSignal = Signal.new()
+FishingSystem.cancelSignal = Signal.new()
+
+export type ClassType = typeof(setmetatable({} :: {
+	activeRod: string,
+	fishingState: number,
+	fishType: string,
+	fishWeight: number,
+	castTime: number,
+	biteIndicator: BiteIndicator.ClassType,
+	tensionHandler: TensionHandler.ClassType,
+	screenGui: ScreenGui,
+	connections: { [string]: Signal.SignalConnection },
+}, FishingSystem))
 
 -- We create this singleton class once when the player joins the game
 function FishingSystem.new(): ClassType
@@ -317,6 +373,8 @@ function FishingSystem.new(): ClassType
 end
 
 -- this function just shows a reward to the player
+-- we point fish descriptions from external FishingDescription
+-- and implement button callback. 
 function FishingSystem._showReward(self:ClassType, releaseFunc: () -> ())
 	local rewardFrame = rewardFrameTemplate:Clone()
 	local rewardText = rewardFrame.RewardText
@@ -342,6 +400,7 @@ function FishingSystem._showReward(self:ClassType, releaseFunc: () -> ())
 	rewardFrame.Parent = self.screenGui
 end
 
+-- we can show any message on ScreenGui (like your fish missed)
 function FishingSystem._showMessage(self: ClassType, message: string)
 	local messageLabel = messageLabelTemplate:Clone()
 	messageLabel.Text = message
@@ -504,3 +563,5 @@ function FishingSystem.cancel(self: ClassType)
 end
 
 return FishingSystem
+
+-- Thank you, so read to the end :)
